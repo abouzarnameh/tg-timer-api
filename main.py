@@ -15,34 +15,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-@app.get("/sessions_by_creator")
-def sessions_by_creator(creator_id: int):
-    conn = get_conn()
-    cur = conn.cursor()
-
-    cur.execute("""
-      SELECT
-        s.id,
-        s.chat_id,
-        s.creator_id,
-        s.status,
-        s.created_at_ms,
-        s.started_at_ms,
-        (SELECT COUNT(*) FROM items i WHERE i.session_id = s.id) AS item_count
-      FROM sessions s
-      WHERE s.creator_id = ?
-      ORDER BY s.id DESC
-      LIMIT 50
-    """, (creator_id,))
-
-    out = [dict(r) for r in cur.fetchall()]
-    conn.close()
-    return out
 
 @app.on_event("startup")
 def startup():
     init_db()
 
+
+# -------------------------
+# Models
+# -------------------------
 class PendingReq(BaseModel):
     chat_id: int
     creator_id: int
@@ -50,8 +31,11 @@ class PendingReq(BaseModel):
 class AddItemReq(BaseModel):
     title: str | None = None
     duration_ms: int
-    gap_ms: int | None = 0  # فعلاً اختیاری، پیش‌فرض صفر
 
+
+# -------------------------
+# Endpoints
+# -------------------------
 @app.post("/session/pending")
 def create_or_get_pending(req: PendingReq):
     conn = get_conn()
@@ -79,6 +63,35 @@ def create_or_get_pending(req: PendingReq):
     conn.close()
     return {"sid": sid}
 
+
+@app.post("/session/pending_simple")
+def create_or_get_pending_simple(creator_id: int):
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
+      SELECT * FROM sessions
+      WHERE creator_id=? AND status='pending'
+      ORDER BY id DESC LIMIT 1
+    """, (creator_id,))
+    row = cur.fetchone()
+
+    if row:
+        sid = row["id"]
+        conn.close()
+        return {"sid": sid}
+
+    now = int(time.time() * 1000)
+    cur.execute("""
+      INSERT INTO sessions (chat_id, creator_id, status, created_at_ms)
+      VALUES (?, ?, 'pending', ?)
+    """, (0, creator_id, now))
+    conn.commit()
+    sid = cur.lastrowid
+    conn.close()
+    return {"sid": sid}
+
+
 @app.post("/session/{sid}/add")
 def add_item(sid: int, req: AddItemReq):
     conn = get_conn()
@@ -89,6 +102,7 @@ def add_item(sid: int, req: AddItemReq):
     if not s:
         conn.close()
         return {"error": "not_found"}
+
     if s["status"] != "pending":
         conn.close()
         return {"error": "session_not_pending"}
@@ -97,23 +111,15 @@ def add_item(sid: int, req: AddItemReq):
     m = cur.fetchone()["m"]
     next_order = int(m) + 1
 
-    # اگر خواستی gap رو ذخیره کنی، باید ستون gap_ms رو تو جدول items داشته باشیم.
-    # فعلاً اگر ستون نداری، gap_ms رو نادیده می‌گیریم.
-    # پیشنهاد: ستون gap_ms اضافه کن. (پایین توضیح دادم)
-
-    try:
-        cur.execute("""
-          INSERT INTO items (session_id, title, duration_ms, order_index)
-          VALUES (?, ?, ?, ?)
-        """, (sid, req.title, req.duration_ms, next_order))
-    except Exception:
-        # اگر بعداً ستون gap_ms اضافه کردی، این INSERT رو عوض کن
-        conn.close()
-        raise
+    cur.execute("""
+      INSERT INTO items (session_id, title, duration_ms, order_index)
+      VALUES (?, ?, ?, ?)
+    """, (sid, req.title, req.duration_ms, next_order))
 
     conn.commit()
     conn.close()
     return {"ok": True, "order_index": next_order}
+
 
 @app.post("/session/{sid}/start")
 def start_session(sid: int):
@@ -142,35 +148,11 @@ def start_session(sid: int):
       SET status='running', started_at_ms=?
       WHERE id=?
     """, (now, sid))
+
     conn.commit()
     conn.close()
     return {"ok": True}
-@app.post("/session/pending_simple")
-def create_or_get_pending_simple(creator_id: int):
-    conn = get_conn()
-    cur = conn.cursor()
 
-    cur.execute("""
-      SELECT * FROM sessions
-      WHERE creator_id=? AND status='pending'
-      ORDER BY id DESC LIMIT 1
-    """, (creator_id,))
-    row = cur.fetchone()
-
-    if row:
-        sid = row["id"]
-        conn.close()
-        return {"sid": sid}
-
-    now = int(time.time() * 1000)
-    cur.execute("""
-      INSERT INTO sessions (chat_id, creator_id, status, created_at_ms)
-      VALUES (?, ?, 'pending', ?)
-    """, (0, creator_id, now))
-    conn.commit()
-    sid = cur.lastrowid
-    conn.close()
-    return {"sid": sid}
 
 @app.get("/session")
 def get_session(sid: int):
@@ -187,6 +169,59 @@ def get_session(sid: int):
     items = [dict(r) for r in cur.fetchall()]
 
     conn.close()
-    return {"session": dict(s), "items": items}
+    return {
+        "server_now_ms": int(time.time() * 1000),
+        "session": dict(s),
+        "items": items
+    }
 
 
+@app.get("/sessions_by_creator")
+def sessions_by_creator(creator_id: int):
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
+      SELECT
+        s.id,
+        s.chat_id,
+        s.creator_id,
+        s.status,
+        s.created_at_ms,
+        s.started_at_ms,
+        (SELECT COUNT(*) FROM items i WHERE i.session_id = s.id) AS item_count
+      FROM sessions s
+      WHERE s.creator_id = ?
+      ORDER BY s.id DESC
+      LIMIT 50
+    """, (creator_id,))
+
+    out = [dict(r) for r in cur.fetchall()]
+    conn.close()
+    return out
+
+
+# -------------------------
+# Delete endpoints
+# -------------------------
+@app.delete("/session/{sid}/item/{item_id}")
+def delete_item(sid: int, item_id: int):
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("DELETE FROM items WHERE id=? AND session_id=?", (item_id, sid))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.delete("/session/{sid}")
+def delete_session(sid: int):
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("DELETE FROM items WHERE session_id=?", (sid,))
+    cur.execute("DELETE FROM sessions WHERE id=?", (sid,))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
