@@ -145,6 +145,32 @@ def start_session(sid: int):
     conn.commit()
     conn.close()
     return {"ok": True}
+@app.post("/session/pending_simple")
+def create_or_get_pending_simple(creator_id: int):
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
+      SELECT * FROM sessions
+      WHERE creator_id=? AND status='pending'
+      ORDER BY id DESC LIMIT 1
+    """, (creator_id,))
+    row = cur.fetchone()
+
+    if row:
+        sid = row["id"]
+        conn.close()
+        return {"sid": sid}
+
+    now = int(time.time() * 1000)
+    cur.execute("""
+      INSERT INTO sessions (chat_id, creator_id, status, created_at_ms)
+      VALUES (?, ?, 'pending', ?)
+    """, (0, creator_id, now))
+    conn.commit()
+    sid = cur.lastrowid
+    conn.close()
+    return {"sid": sid}
 
 @app.get("/session")
 def get_session(sid: int):
@@ -162,4 +188,5 @@ def get_session(sid: int):
 
     conn.close()
     return {"session": dict(s), "items": items}
+
 
