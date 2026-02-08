@@ -15,6 +15,29 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+@app.get("/sessions_by_creator")
+def sessions_by_creator(creator_id: int):
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
+      SELECT
+        s.id,
+        s.chat_id,
+        s.creator_id,
+        s.status,
+        s.created_at_ms,
+        s.started_at_ms,
+        (SELECT COUNT(*) FROM items i WHERE i.session_id = s.id) AS item_count
+      FROM sessions s
+      WHERE s.creator_id = ?
+      ORDER BY s.id DESC
+      LIMIT 50
+    """, (creator_id,))
+
+    out = [dict(r) for r in cur.fetchall()]
+    conn.close()
+    return out
 
 @app.on_event("startup")
 def startup():
@@ -139,3 +162,4 @@ def get_session(sid: int):
 
     conn.close()
     return {"session": dict(s), "items": items}
+
